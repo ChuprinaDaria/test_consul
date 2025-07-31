@@ -3,7 +3,7 @@ from telethon import TelegramClient, events
 from telethon.tl.custom import Button
 from dotenv import load_dotenv
 from parse_like_whore import parse_slot_message
-from db import init_db, is_processed, mark_processed, is_content_processed
+from db import init_db, is_processed, mark_processed, is_content_processed_recently
 import asyncio
 
 load_dotenv()
@@ -62,9 +62,10 @@ async def handler(event):
         parsed_msg, buttons, content_hash = parse_slot_message(event.raw_text)
 
         if parsed_msg and buttons and content_hash:
-            # Перевіряємо чи не дублюється контент
-            if is_content_processed(content_hash):
-                print("⏭️ ПРОПУЩЕНО: Аналогічний контент вже був опублікований")
+            # Перевіряємо чи не публікувався такий же контент протягом останніх 30 хвилин
+            if is_content_processed_recently(content_hash, 30):
+                print("⏭️ ПРОПУЩЕНО: Аналогічний контент публікувався протягом останніх 30 хвилин")
+                print("💡 Слот може з'явитися знову через 30+ хвилин якщо хтось відмовиться")
                 return
             
             print("✅ УСПІШНО РОЗПАРСЕНО!")
@@ -164,4 +165,3 @@ if __name__ == "__main__":
         print(f"❌ ПОМИЛКА запуску: {e}")
         import traceback
         traceback.print_exc()
-        #

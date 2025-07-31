@@ -121,31 +121,32 @@ def parse_slot_message(text):
         return None, None, None
     
     # Створюємо основне повідомлення
-    msg = f"""🟢 **Доступні слоти в {city}!**
+    msg = f"""🟢 Доступні слоти в {city}!
 
-📌 **Послуга:** {poslyga}
+📌 Послуга: {poslyga}
 
-{chr(10).join(date_info)}
+🔹 **Дорослі (10хв):** {'; '.join([f"{date}: {', '.join(re.findall(r'\\d{2}:\\d{2}', times_text))}" for date, times_text in date_sections])}"""
 
-📊 **Доступні записи за послугами:**
-
-🔹 **Паспорт дорослому** (10 хв):
-   • {'; '.join([f"{date}: {', '.join(re.findall(r'\\d{2}:\\d{2}', times_text))}" for date, times_text in date_sections])}"""
-
-    # Додаємо згорнуту секцію для дитячих послуг якщо є
+    # Додаємо дитячі послуги якщо є (з відступом)
     if has_child_services:
-        msg += f"""
-
-<details>
-<summary>👶 **Послуги для дітей** (натисніть щоб розгорнути)</summary>
-
-{chr(10).join(child_services_info)}
-</details>"""
-
-    # Додаємо хештеги
-    msg += f"""
-
-#{poslyga.split()[0].lower()} #{city.replace(' ', '_')} #{'/'.join(all_dates)}"""
+        # Збираємо дитячі слоти
+        teen_slots = []
+        child_slots = []
+        
+        for date, times_text in date_sections:
+            sorted_times, services = parse_times_and_calculate_services(times_text)
+            if services['teen']:
+                teen_slots.append(f"{date}: {', '.join(services['teen'])}")
+            if services['child']:
+                child_slots.append(f"{date}: {', '.join(services['child'])}")
+        
+        # Додаємо порожні рядки для відступу
+        msg += "\n\n"
+        
+        if teen_slots:
+            msg += f"Записи дітям 12-16 років (10хв): {'; '.join(teen_slots)}\n"
+        if child_slots:
+            msg += f"До 12 років (15хв): {'; '.join(child_slots)}"
 
     # Кнопка для переходу на сайт
     buttons = [Button.url("🔗 Записатися на слот", "https://id.e-consul.gov.ua/")]
