@@ -3,7 +3,7 @@ from telethon import TelegramClient, events
 from telethon.tl.custom import Button
 from dotenv import load_dotenv
 from parse_like_whore import parse_slot_message
-from db import init_db, is_processed, mark_processed
+from db import init_db, is_processed, mark_processed, is_content_processed
 import asyncio
 
 load_dotenv()
@@ -59,9 +59,14 @@ async def handler(event):
 
         # Парсимо повідомлення
         print("🔄 Парсинг повідомлення...")
-        parsed_msg, buttons = parse_slot_message(event.raw_text)
+        parsed_msg, buttons, content_hash = parse_slot_message(event.raw_text)
 
-        if parsed_msg and buttons:
+        if parsed_msg and buttons and content_hash:
+            # Перевіряємо чи не дублюється контент
+            if is_content_processed(content_hash):
+                print("⏭️ ПРОПУЩЕНО: Аналогічний контент вже був опублікований")
+                return
+            
             print("✅ УСПІШНО РОЗПАРСЕНО!")
             print("📄 Відформатоване повідомлення:")
             print("-" * 40)
@@ -79,11 +84,11 @@ async def handler(event):
                     channel_id, 
                     parsed_msg, 
                     buttons=buttons, 
-                    parse_mode='html'
+                    parse_mode='markdown'
                 )
                 
-                # Позначаємо як оброблене
-                mark_processed(msg_id)
+                # Позначаємо як оброблене з хешем контенту
+                mark_processed(msg_id, content_hash)
                 
                 print(f"🎉 УСПІШНО ВІДПРАВЛЕНО в канал @{channel_id}!")
                 

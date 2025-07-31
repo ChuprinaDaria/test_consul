@@ -7,7 +7,9 @@ def init_db():
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS processed (
-                msg_id INTEGER PRIMARY KEY
+                msg_id INTEGER PRIMARY KEY,
+                content_hash TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         conn.commit()
@@ -18,8 +20,28 @@ def is_processed(msg_id: int) -> bool:
         cursor.execute('SELECT 1 FROM processed WHERE msg_id = ?', (msg_id,))
         return cursor.fetchone() is not None
 
-def mark_processed(msg_id: int):
+def is_content_processed(content_hash: str) -> bool:
+    """Перевіряє чи вже було оброблено повідомлення з таким же контентом"""
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
-        cursor.execute('INSERT OR IGNORE INTO processed (msg_id) VALUES (?)', (msg_id,))
+        cursor.execute('SELECT 1 FROM processed WHERE content_hash = ?', (content_hash,))
+        return cursor.fetchone() is not None
+
+def mark_processed(msg_id: int, content_hash: str = None):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute('INSERT OR IGNORE INTO processed (msg_id, content_hash) VALUES (?, ?)', 
+                      (msg_id, content_hash))
         conn.commit()
+
+def cleanup_old_records(days: int = 30):
+    """Видаляє записи старше вказаної кількості днів"""
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            DELETE FROM processed 
+            WHERE timestamp < datetime('now', '-' || ? || ' days')
+        ''', (days,))
+        deleted = cursor.rowcount
+        conn.commit()
+        return deleted

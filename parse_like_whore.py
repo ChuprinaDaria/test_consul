@@ -1,6 +1,7 @@
 import re
 from telethon.tl.custom import Button
 from datetime import datetime, timedelta
+import hashlib
 
 def parse_times_and_calculate_services(times_str):
     """
@@ -48,13 +49,20 @@ def parse_times_and_calculate_services(times_str):
     
     return sorted_times, services
 
+def generate_content_hash(location, service, date_sections):
+    """
+    Генерує хеш для контенту повідомлення щоб уникнути дублювання
+    """
+    content = f"{location}_{service}_{'_'.join([f'{date}:{times}' for date, times in date_sections])}"
+    return hashlib.md5(content.encode()).hexdigest()
+
 def parse_slot_message(text):
     """
     Парсить повідомлення про слоти від ConsulateUkraineBot
-    Повертає відформатоване повідомлення та кнопки
+    Повертає відформатоване повідомлення, кнопки та хеш контенту
     """
     if not text or "З'явились нові слоти!" not in text:
-        return None, None
+        return None, None, None
     
     # Шукаємо консульство/посольство
     location = re.search(r'🔸 (Генеральне Консульство України в .+|Посольство України в .+)', text)
@@ -63,14 +71,17 @@ def parse_slot_message(text):
     service = re.search(r'🔸 Послуга: (.+)', text)
     
     # Шукаємо всі дати та часи (поліпшений regex)
-    date_sections = re.findall(r'📅 Слоти які були опубліковані:\s*(\d{2}\.\d{2}\.\d{4}):(.*?)(?=📅|⚠️|$)', text, re.DOTALL)
+    date_sections = re.findall(r'📅 Слоти які були опубліковані:\s*(\d{2}\.\d{2}\.\d{4}):(.*?)(?=📅|⚠️|🔥|$)', text, re.DOTALL)
     
     if not (location and service and date_sections):
         print("🔍 Debug: Не знайдено всі необхідні компоненти")
         print(f"Location: {bool(location)}")
         print(f"Service: {bool(service)}")
         print(f"Date sections: {len(date_sections)}")
-        return None, None
+        return None, None, None
+
+    # Генеруємо хеш контенту для перевірки дублювання
+    content_hash = generate_content_hash(location.group(1), service.group(1), date_sections)
 
     # Отримуємо назву міста
     city = location.group(1).replace("Генеральне Консульство України в ", "").replace("Посольство України в ", "").strip()
@@ -81,11 +92,8 @@ def parse_slot_message(text):
     # Обробляємо всі дати та часи
     date_info = []
     all_dates = []
-    services_summary = {
-        'adult': [],
-        'teen': [], 
-        'child': []
-    }
+    has_child_services = False
+    child_services_info = []
     
     for date, times_text in date_sections:
         # Парсимо часи та розраховуємо послуги
@@ -93,88 +101,75 @@ def parse_slot_message(text):
         
         if sorted_times:
             # Додаємо інформацію про дату
-            date_info.append(f"📆 <b>{date}</b>: <code>{', '.join(sorted_times)}</code>")
+            date_info.append(f"📆 **{date}**: `{', '.join(sorted_times)}`")
             all_dates.append(date.replace('.', '_'))
             
-            # Зберігаємо послуги для підсумку
-            if services['adult']:
-                services_summary['adult'].append(f"{date}: {', '.join(services['adult'])}")
-            if services['teen']:
-                services_summary['teen'].append(f"{date}: {', '.join(services['teen'])}")
-            if services['child']:
-                services_summary['child'].append(f"{date}: {', '.join(services['child'])}")
+            # Збираємо інформацію про дитячі послуги
+            if services['teen'] or services['child']:
+                has_child_services = True
+                
+                if services['teen']:
+                    child_services_info.append(f"🔹 **Паспорт дитині 12-16 років** (10 хв):")
+                    child_services_info.append(f"   • {date}: {', '.join(services['teen'])}")
+                
+                if services['child']:
+                    child_services_info.append(f"🔹 **Паспорт дитині до 12 років** (15 хв):")
+                    child_services_info.append(f"   • {date}: {', '.join(services['child'])}")
     
     if not date_info:
         print("🔍 Debug: Не знайдено жодних часів")
-        return None, None
+        return None, None, None
     
     # Створюємо основне повідомлення
-    msg = f"""<b>🟢 Доступні слоти в <u>{city}</u>!</b>
+    msg = f"""🟢 **Доступні слоти в {city}!**
 
-<b>📌 Послуга:</b> {poslyga}
+📌 **Послуга:** {poslyga}
 
-{chr(10).join(date_info)}"""
-    
-    # Додаємо аналіз послуг, якщо є більше 2 слотів
-    total_slots = sum(len(times_text.split()) for _, times_text in date_sections)
-    
-    if total_slots > 2:
-        msg += f"\n\n📊 <b>Доступні записи за послугами:</b>\n"
-        
-        if services_summary['adult']:
-            msg += f"\n🔹 <b>Паспорт дорослому</b> (10 хв):\n"
-            for service_line in services_summary['adult']:
-                msg += f"   • {service_line}\n"
-        
-        if services_summary['teen']:
-            msg += f"\n🔹 <b>Паспорт дитині 12-16 років</b> (10 хв):\n"
-            for service_line in services_summary['teen']:
-                msg += f"   • {service_line}\n"
-        
-        if services_summary['child']:
-            msg += f"\n🔹 <b>Паспорт дитині до 12 років</b> (15 хв):\n"
-            for service_line in services_summary['child']:
-                msg += f"   • {service_line}\n"
-    
-    msg += f"\n⚡ <i>Не барися — розбирають швидко!</i>\n\n#слоти #{poslyga.split()[0].lower()} #{city.replace(' ', '_')} #{'/'.join(all_dates)}"
+{chr(10).join(date_info)}
+
+📊 **Доступні записи за послугами:**
+
+🔹 **Паспорт дорослому** (10 хв):
+   • {'; '.join([f"{date}: {', '.join(re.findall(r'\\d{2}:\\d{2}', times_text))}" for date, times_text in date_sections])}"""
+
+    # Додаємо згорнуту секцію для дитячих послуг якщо є
+    if has_child_services:
+        msg += f"""
+
+<details>
+<summary>👶 **Послуги для дітей** (натисніть щоб розгорнути)</summary>
+
+{chr(10).join(child_services_info)}
+</details>"""
+
+    # Додаємо хештеги
+    msg += f"""
+
+#{poslyga.split()[0].lower()} #{city.replace(' ', '_')} #{'/'.join(all_dates)}"""
 
     # Кнопка для переходу на сайт
     buttons = [Button.url("🔗 Записатися на слот", "https://id.e-consul.gov.ua/")]
     
-    return msg, buttons
+    return msg, buttons, content_hash
 
 
 def test_parser():
     """Функція для тестування парсера"""
-    test_message1 = """🆕 З'явились нові слоти!
-🔸 Генеральне Консульство України в Торонто
+    test_message = """🆕 З'явились нові слоти!
+🔸 Посольство України в Канаді
 🔸 Послуга: Оформлення закордонного паспорта
 📅 Слоти які були опубліковані:
-21.01.2026: 14:00 14:10 14:20 14:30 14:40 14:50 15:00 15:10 15:20 15:30 15:40 15:50 16:00 16:10 16:20 16:30 16:40 16:50 17:00 17:10 17:20 17:30 17:40 17:50
-⚠️ У безкоштовній версії надходження повідомлень про нові слоти відбувається із затримкою 5 хвилин."""
+15.01.2026: 10:30
+🔥 Ви отримали це повідомлення без затримок! Дякуємо за оформлення преміум підписки!"""
 
-    test_message2 = """🆕 З'явились нові слоти!
-🔸 Генеральне Консульство України в Едмонтоні
-🔸 Послуга: Оформлення закордонного паспорта
-📅 Слоти які були опубліковані:
-21.01.2026: 13:00 13:10 13:20 13:30 13:40 13:50 10:00 10:10 10:20 10:30 10:40 10:50 11:00 11:10 11:20 11:30 11:40 11:50 12:00 12:10 12:20 12:30 12:40 12:50
-⚠️ У безкоштовній версії надходження повідомлень про нові слоти відбувається із затримкою 5 хвилин."""
-
-    print("🧪 ТЕСТ 1 - Торонто:")
+    print("🧪 ТЕСТ - Канада:")
     print("=" * 60)
-    result1, buttons1 = parse_slot_message(test_message1)
-    if result1:
-        print(result1)
+    result, buttons, content_hash = parse_slot_message(test_message)
+    if result:
+        print(result)
+        print(f"\nContent hash: {content_hash}")
     else:
-        print("❌ Тест 1 неуспішний")
-    
-    print("\n🧪 ТЕСТ 2 - Едмонтон:")
-    print("=" * 60)
-    result2, buttons2 = parse_slot_message(test_message2)
-    if result2:
-        print(result2)
-    else:
-        print("❌ Тест 2 неуспішний")
+        print("❌ Тест неуспішний")
 
 if __name__ == "__main__":
     test_parser()
