@@ -86,4 +86,4 @@ async def test_channel_access():
     await bot_client.disconnect()
 
 if __name__ == "__main__":
-    asyncio.run(test_channel_access())
+    asyncio.run(test_channel_access())#

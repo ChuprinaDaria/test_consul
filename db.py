@@ -45,3 +45,4 @@ def cleanup_old_records(days: int = 30):
         deleted = cursor.rowcount
         conn.commit()
         return deleted
+    #
