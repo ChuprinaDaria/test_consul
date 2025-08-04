@@ -3,8 +3,10 @@ from telethon import TelegramClient, events
 from telethon.tl.custom import Button
 from dotenv import load_dotenv
 from parse_like_whore import parse_slot_message
-from db import init_db, is_processed, mark_processed, is_content_processed_recently
+from db import init_db, is_processed, is_content_processed_recently
+from botstatisticshandler import BotStatisticsHandler, mark_processed_with_stats
 import asyncio
+import re
 
 load_dotenv()
 
@@ -28,11 +30,40 @@ except:
     channel_id = channel_id_raw
     print(f"📝 Використовую як рядок: {channel_id}")
 
-# Створюємо клієнтів
+# Створюємо клієнтів та статистики
 user_client = TelegramClient(session, api_id, api_hash)
 bot_client = TelegramClient('bot', api_id, api_hash)
+stats_handler = BotStatisticsHandler()
 
 init_db()
+
+def extract_slot_info(text, parsed_msg):
+    """Витягує інформацію про слоти для статистики"""
+    city = None
+    service = None
+    slots_count = 0
+    available_dates = []
+    
+    # Витягуємо місто
+    location_match = re.search(r'🔸 (Генеральне Консульство України в .+|Посольство України в .+)', text)
+    if location_match:
+        city = location_match.group(1).replace("Генеральне Консульство України в ", "").replace("Посольство України в ", "").strip()
+    
+    # Витягуємо послугу
+    service_match = re.search(r'🔸 Послуга: (.+)', text)
+    if service_match:
+        service = service_match.group(1).strip()
+    
+    # Рахуємо слоти та дати
+    date_sections = re.findall(r'📅 Слоти які були опубліковані:\s*(\d{2}\.\d{2}\.\d{4}):(.*?)(?=📅|⚠️|🔥|$)', text, re.DOTALL)
+    
+    for date, times_text in date_sections:
+        times = re.findall(r'\d{2}:\d{2}', times_text)
+        if times:
+            slots_count += len(times)
+            available_dates.append(date)
+    
+    return city, service, slots_count, available_dates
 
 @user_client.on(events.NewMessage(from_users=source_user))
 async def handler(event):
@@ -88,10 +119,21 @@ async def handler(event):
                     parse_mode='markdown'
                 )
                 
-                # Позначаємо як оброблене з хешем контенту
-                mark_processed(msg_id, content_hash)
+                # Витягуємо дані для статистики
+                city, service, slots_count, available_dates = extract_slot_info(event.raw_text, parsed_msg)
+                
+                # Позначаємо як оброблене з статистикою
+                mark_processed_with_stats(
+                    msg_id=msg_id,
+                    content_hash=content_hash,
+                    city=city,
+                    service=service,
+                    slots_count=slots_count,
+                    available_dates=available_dates
+                )
                 
                 print(f"🎉 УСПІШНО ВІДПРАВЛЕНО в канал @{channel_id}!")
+                print(f"📊 Додано до статистики: {city}, {service}, {slots_count} слотів")
                 
             except Exception as send_error:
                 print(f"❌ ПОМИЛКА при відправці: {send_error}")
@@ -106,6 +148,14 @@ async def handler(event):
         traceback.print_exc()
     
     print("="*60)
+
+@bot_client.on(events.NewMessage(pattern='/start'))
+async def start_handler(event):
+    await stats_handler.handle_start_command(event)
+
+@bot_client.on(events.CallbackQuery)
+async def callback_handler(event):
+    await stats_handler.handle_stats_callback(event)
 
 async def main():
     print("🚀 ЗАПУСК БОТА ДЛЯ ПЕРЕСИЛАННЯ СЛОТІВ")
@@ -145,6 +195,7 @@ async def main():
         print("\n" + "="*50)
         print("🎯 ВСЕ ГОТОВО! Чекаю нові повідомлення про слоти...")
         print("💡 Бот буде автоматично пересилати ТІЛЬКИ НОВІ повідомлення")
+        print("📊 Статистика збирається автоматично. Використайте /start для перегляду")
         print("📱 Для зупинки натисніть Ctrl+C")
         print("="*50)
         
