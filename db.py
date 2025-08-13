@@ -81,3 +81,46 @@ def get_recent_publications(hours: int = 24):
             ORDER BY timestamp DESC
         ''', (hours,))
         return cursor.fetchall()
+    
+
+def add_sent_msg_column():
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute('ALTER TABLE processed ADD COLUMN sent_msg_id INTEGER')
+        except sqlite3.OperationalError:
+            pass
+        conn.commit()
+
+def save_sent_message(content_hash: str, sent_msg_id: int):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE processed
+            SET sent_msg_id = ?
+            WHERE content_hash = ?
+        ''', (sent_msg_id, content_hash))
+        conn.commit()
+
+def get_sent_message_id(content_hash: str):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT sent_msg_id FROM processed WHERE content_hash = ?', (content_hash,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+def get_sent_message_id_by_city(city: str):
+    """
+    Повертає останній sent_msg_id для заданого міста.
+    """
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT sent_msg_id 
+            FROM processed 
+            WHERE city = ?
+            ORDER BY timestamp DESC 
+            LIMIT 1
+        """, (city,))
+        row = cursor.fetchone()
+        return row[0] if row else None
