@@ -30,13 +30,29 @@ class BotStatisticsHandler:
         data = event.data.decode()
         
         if data.startswith("stats_"):
-            days = int(data.replace("stats_", ""))
+            # Підтримуємо і старий і новий формат
+            period_str = data.replace("stats_", "")
+            
+            if period_str == "week":
+                days = 7
+            elif period_str == "month": 
+                days = 30
+            elif period_str == "year":
+                days = 365
+            elif period_str == "refresh":
+                days = 7  # за замовчуванням
+            else:
+                try:
+                    days = int(period_str)
+                except ValueError:
+                    days = 7  # fallback
+            
             stats_msg = self.format_simple_statistics(days)
             
             buttons = [
                 [Button.callback("📊 За тиждень", b"stats_7")],
                 [Button.callback("📆 За місяць", b"stats_30")],
-                [Button.callback("🔄 Оновити", data.encode())]
+                [Button.callback("🔄 Оновити", f"stats_{days}".encode())]
             ]
             
             await event.edit(stats_msg, buttons=buttons)
