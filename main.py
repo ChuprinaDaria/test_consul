@@ -1,9 +1,8 @@
 import os
 import re
 import asyncio
-import sqlite3
 from datetime import datetime, timedelta
-
+from collections import defaultdict
 import pytz
 from telethon import TelegramClient, events
 from telethon.tl.custom import Button
@@ -16,9 +15,11 @@ from db import (
     is_content_processed_recently,
     get_sent_message_id_by_city,
     save_sent_message,
-    mark_processed,  # використовуємо, щоб відмічати "зайнято"-повідомлення
+    mark_processed_with_stats,
+    mark_gone_processed,
+    get_statistics_data
 )
-from botstatisticshandler import BotStatisticsHandler, mark_processed_with_stats
+from botstatisticshandler import BotStatisticsHandler
 
 # === Константи / змінні оточення ===
 load_dotenv()
@@ -29,9 +30,6 @@ session = os.getenv("SESSION_NAME")
 bot_token = os.getenv("BOT_TOKEN")
 channel_id_raw = os.getenv("BOT_USERNAME")
 source_user = os.getenv("SOURCE_USER")
-
-# Однакове ім'я БД у всіх модулях
-DB_FILE = "processed_messages.db"
 
 # Часовий пояс Канади для статистики
 CANADA_TZ = pytz.timezone("America/Toronto")
@@ -61,136 +59,111 @@ init_db()
 
 async def handle_slots_gone(event):
     """
-    Якщо прийшло повідомлення "❌ На жаль..." – знаходимо попередній пост у каналі за містом
+    Якщо прийшло повідомлення "❌ На жаль..." — знаходимо попередній пост у каналі за містом
     і редагуємо його коротким текстом, без преміум-хвоста.
     """
-    full_place, city, minutes_alive = parse_slots_gone_message(event.raw_text)
+    full_place, city, time_display = parse_slots_gone_message(event.raw_text)
     if not city:
         return False  # це не "зайнято"-повідомлення
 
-    prev_id = get_sent_message_id_by_city(city)
-    if not prev_id:
+    sent_msg_id, content_hash = get_sent_message_id_by_city(city)
+    if not sent_msg_id:
         print(f"⚠️ Не знайдено попереднього повідомлення для міста: {city}")
         # Все одно помічаємо як оброблене, щоб не зациклитись
         try:
-            mark_processed(event.id, None)
+            mark_gone_processed("", event.id)
         except Exception:
             pass
         return True
 
-    new_text = (
-        f"❌ На жаль, усі слоти у {full_place} вже зайняті!\n"
-        f"Слоти були доступні протягом {minutes_alive} хвилин."
-    )
+    new_text = f"❌ **На жаль, слотів у {full_place} більше немає!**\n\n⏱️ Слоти були доступні **{time_display}**"
 
     try:
-        await bot_client.edit_message(channel_id, prev_id, new_text)
-        print(f"✏️ Оновлено повідомлення для {city}")
+        await bot_client.edit_message(channel_id, sent_msg_id, new_text, parse_mode='markdown')
+        print(f"✏️ Оновлено повідомлення для {city}: {time_display}")
     except Exception as e:
-        # ← ця стрічка для швидкого пошуку проблем
         print(f"❌ Не вдалося оновити повідомлення для {city}: {e}")
 
     # Позначаємо "зайнято"-повідомлення як оброблене
     try:
-        mark_processed(event.id, None)
+        mark_gone_processed(content_hash if content_hash else "", event.id)
     except Exception:
         pass
     return True
 
 
-def extract_slot_info(text, parsed_msg):
-    """Витягує базову інфу про слоти для статистики."""
-    city = None
-    service = None
+def extract_slot_info(original_text, parsed_msg):
+    """Витягує інфо про слоти для статистики."""
+    city = service = None
     slots_count = 0
     available_dates = []
 
-    # Місто
-    location_match = re.search(r'🔸 (Генеральне Консульство України в .+|Посольство України в .+)', text)
-    if location_match:
-        city = (location_match.group(1)
-                .replace("Генеральне Консульство України в ", "")
-                .replace("Посольство України в ", "")
-                .strip())
+    # Місто з повідомлення
+    if "слоти в " in parsed_msg:
+        city_match = re.search(r'слоти в (.+?)!', parsed_msg)
+        if city_match:
+            city = city_match.group(1).strip()
 
-    # Послуга
-    service_match = re.search(r'🔸 Послуга: (.+)', text)
+    # Послуга з оригінального тексту
+    service_match = re.search(r'🔸 Послуга: (.+)', original_text)
     if service_match:
         service = service_match.group(1).strip()
 
-    # Дати/часи
-    date_sections = re.findall(
-        r'📅 Слоти які були опубліковані:\s*(\d{2}\.\d{2}\.\d{4}):(.*?)(?=📅|⚠️|🔥|$)',
-        text, re.DOTALL
-    )
-
-    for date, times_text in date_sections:
-        times = re.findall(r'\d{2}:\d{2}', times_text)
-        if times:
-            slots_count += len(times)
-            available_dates.append(date)
+    # Кількість слотів та дати з часів у повідомленні
+    times_section = re.search(r'🕐 \*\*Доступні часи:\*\* (.+)', parsed_msg)
+    if times_section:
+        times_text = times_section.group(1)
+        # Рахуємо всі часи
+        all_times = re.findall(r'\d{2}:\d{2}', times_text)
+        slots_count = len(all_times)
+        
+        # Витягуємо дати
+        dates = re.findall(r'\*\*(\d{2}\.\d{2}\.\d{4})\*\*:', times_text)
+        available_dates = dates
 
     return city, service, slots_count, available_dates
 
 
-# --- Мікро-аналітика без лізти у внутрішні методи StatisticsModule ---
-def compute_top_hours_and_cities(days: int = 30, top_n: int = 3):
-    """
-    Повертає (top_hours, top_cities) за останні `days` днів.
-    top_hours: список (hour, count)
-    top_cities: список (city, count)
-    """
-    since_utc = datetime.now(pytz.UTC) - timedelta(days=days)
-
-    hour_counts = {}
-    city_counts = {}
-
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        # Беремо canada_time якщо є, інакше конвертимо timestamp (UTC) → Canada TZ
-        cursor.execute("""
-            SELECT city, canada_time, timestamp
-            FROM processed
-            WHERE city IS NOT NULL
-              AND (timestamp >= ?)
-        """, (since_utc.strftime('%Y-%m-%d %H:%M:%S'),))
-
-        rows = cursor.fetchall()
-
-    for city, canada_time_str, timestamp_str in rows:
-        if not city:
-            continue
-
-        # Місто
-        city_counts[city] = city_counts.get(city, 0) + 1
-
-        # Час (година в Канаді)
+def get_hourly_city_stats(days=30):
+    """Отримує статистику по годинах та містах"""
+    data = get_statistics_data(days)
+    
+    hour_counts = defaultdict(int)
+    city_counts = defaultdict(int)
+    
+    for city, service, slots_count, canada_time_str, timestamp in data:
+        if city:
+            city_counts[city] += 1
+            
+        # Обробка часу
         try:
             if canada_time_str:
-                # ISO або "%Y-%m-%d %H:%M:%S"
                 if 'T' in canada_time_str:
                     ct = datetime.fromisoformat(canada_time_str.replace('Z', '+00:00'))
                 else:
                     ct = datetime.strptime(canada_time_str, '%Y-%m-%d %H:%M:%S')
             else:
-                utc_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                utc_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
                 utc_time = pytz.UTC.localize(utc_time)
                 ct = utc_time.astimezone(CANADA_TZ)
-            hour = ct.hour
-            hour_counts[hour] = hour_counts.get(hour, 0) + 1
-        except Exception:
+            
+            hour_counts[ct.hour] += 1
+        except:
             continue
-
-    top_hours = sorted(hour_counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
-    top_cities = sorted(city_counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    
+    # Топ-3 години та міста
+    top_hours = sorted(hour_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_cities = sorted(city_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+    
     return top_hours, top_cities
 
 
+# --- Мікро-аналітика без лізти у внутрішні методи StatisticsModule ---
 _announced_today = set()  # {(YYYY-MM-DD, hour)}
 
 async def notify_upcoming_slots_task():
     """
-    Раз на хвилину перевіряємо: якщо за 5 хвилин починається “топ-година”,
+    Раз на хвилину перевіряємо: якщо за 5 хвилин починається "топ-година",
     шлемо тихе повідомлення з найчастішими містами.
     """
     global _announced_today
@@ -198,9 +171,9 @@ async def notify_upcoming_slots_task():
     while True:
         try:
             now = datetime.now(CANADA_TZ)
-            top_hours, top_cities = compute_top_hours_and_cities(days=30, top_n=3)
+            top_hours, top_cities = get_hourly_city_stats(days=30)
 
-            # Якщо нема достатньо статистики – спимо
+            # Якщо немає достатньо статистики — спимо
             if not top_hours or not top_cities:
                 await asyncio.sleep(60)
                 continue
@@ -213,11 +186,11 @@ async def notify_upcoming_slots_task():
                     key = (now.strftime('%Y-%m-%d'), next_hour)
                     if key not in _announced_today:
                         # Формуємо список міст (через кому)
-                        cities_list = ", ".join(city for city, _ in top_cities)
-                        text = f"🔔 Є за 5 хв можливі слоти в {cities_list} (за статистикою минулого місяця)."
+                        cities_list = ", ".join(city for city, _ in top_cities[:2])  # Топ-2 міста
+                        text = f"🔔 **За 5 хвилин можливі слоти в {cities_list}**\n\n📊 _(За статистикою минулого місяця)_"
 
                         try:
-                            await bot_client.send_message(channel_id, text, silent=True)
+                            await bot_client.send_message(channel_id, text, silent=True, parse_mode='markdown')
                             print(f"🔕 Тихе попередження на {next_hour:02d}:00 — {cities_list}")
                         except Exception as e:
                             print(f"⚠️ Не вдалося надіслати тихе попередження: {e}")
@@ -241,7 +214,7 @@ async def notify_upcoming_slots_task():
 @user_client.on(events.NewMessage(from_users=source_user))
 async def handler(event):
     print("\n" + "="*60)
-    print("📥 НОВЕ ПОВІДОМЛЕННЯ ОТРИМАНО!")
+    print("🔥 НОВЕ ПОВІДОМЛЕННЯ ОТРИМАНО!")
     print("="*60)
 
     try:
@@ -256,30 +229,27 @@ async def handler(event):
         print(event.raw_text[:500] + ("..." if len(event.raw_text) > 500 else ""))
         print("-" * 40)
 
-        # 0) Якщо це повідомлення про "слоти вже зайняті" – обробляємо його і завершуємо
+        # 0) Якщо це повідомлення про "слоти вже зайняті" — обробляємо його і завершуємо
         handled_gone = await handle_slots_gone(event)
         if handled_gone:
             return
 
         # 1) Антидубль по msg_id
         if is_processed(msg_id):
-            print("⏭️ ПРОПУЩЕНО: Повідомлення вже було оброблено раніше")
+            print("⭕ ПРОПУЩЕНО: Повідомлення вже було оброблено раніше")
             return
 
         # 2) Парсимо "З'явились нові слоти!"
-        print("🔄 Парсинг повідомлення...")
+        print("📄 Парсинг повідомлення...")
         parsed_msg, buttons, content_hash = parse_slot_message(event.raw_text)
 
         if parsed_msg and buttons and content_hash:
             # 3) Антидубль по контенту (за 30 хв)
             if is_content_processed_recently(content_hash, 30):
-                print("⏭️ ПРОПУЩЕНО: Аналогічний контент публікувався протягом останніх 30 хвилин")
-                print("💡 Слот може з'явитися знову через 30+ хвилин якщо хтось відмовиться")
+                print("⭕ ПРОПУЩЕНО: Аналогічний контент публікувався протягом останніх 30 хвилин")
+                print("💡 Слот може з'явитись знову через 30+ хвилин якщо хтось відмовиться")
                 # все одно помітимо як оброблене за msg_id, щоб не дьоргати по колу
-                try:
-                    mark_processed(msg_id, content_hash)
-                except Exception:
-                    pass
+                mark_processed_with_stats(msg_id, content_hash)
                 return
 
             print("✅ УСПІШНО РОЗПАРСЕНО!")
@@ -288,7 +258,7 @@ async def handler(event):
             print(parsed_msg)
             print("-" * 40)
 
-            print("🔘 Кнопки:")
+            print("📘 Кнопки:")
             for btn in buttons:
                 print(f"   • {btn.text} → {btn.url}")
 
@@ -305,7 +275,7 @@ async def handler(event):
                 # 5) Дані для статистики
                 city, service, slots_count, available_dates = extract_slot_info(event.raw_text, parsed_msg)
 
-                # 6) Позначаємо як оброблене зі статистикою (вставка або оновлення)
+                # 6) Позначаємо як оброблене зі статистикою
                 mark_processed_with_stats(
                     msg_id=msg_id,
                     content_hash=content_hash,
@@ -315,7 +285,7 @@ async def handler(event):
                     available_dates=available_dates
                 )
 
-                # 7) Зберігаємо message_id для можливого редагування (”❌ На жаль…”)
+                # 7) Зберігаємо message_id для можливого редагування ("❌ На жаль…")
                 save_sent_message(content_hash, sent.id)
 
                 print(f"🎉 УСПІШНО ВІДПРАВЛЕНО в канал @{channel_id}!")
@@ -325,12 +295,12 @@ async def handler(event):
                 print(f"❌ ПОМИЛКА при відправці: {send_error}")
 
         else:
-            print("⚠️ НЕ РОЗПІЗНАНО: Повідомлення не містить інформації про слоти або має неправильний формат")
+            print("⚠️ НЕ РОЗПІЗНАНО: Повідомлення не містить інформацію про слоти або має неправильний формат")
             print("💡 Очікувані ключові слова: \"З'явились нові слоти!\"")
 
-        # 8) Наостанок — відмітимо msg_id, щоб повторно не обробляти
+        # 8) Наостанок — відмічуємо msg_id, щоб повторно не обробляти
         try:
-            mark_processed(msg_id, None)
+            mark_processed_with_stats(msg_id, None)
         except Exception:
             pass
 
@@ -364,8 +334,8 @@ async def main():
     print("="*50)
 
     try:
-        # Під'єднання
-        print("🔄 Підключення до Telegram...")
+        # Підключання
+        print("📄 Підключення до Telegram...")
         await user_client.start()
         await bot_client.start(bot_token=bot_token)
 
@@ -390,7 +360,7 @@ async def main():
             print(f"✅ Канал призначення: {channel_title} (@{channel_id})")
         except Exception as e:
             print(f"❌ Не вдалося знайти канал {channel_id}: {e}")
-            print("💡 Переконайтеся що бот доданий до каналу як адміністратор!")
+            print("💡 Переконайтесь що бот доданий до каналу як адміністратор!")
             return
 
         print("\n" + "="*50)
@@ -419,6 +389,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n👋 Бот зупинено користувачем")
     except Exception as e:
-        print(f"❌ ПОМИЛКА запуску: {e}")
+        print(f"❌ Помилка запуску: {e}")
         import traceback
         traceback.print_exc()
