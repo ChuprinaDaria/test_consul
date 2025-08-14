@@ -19,8 +19,8 @@ class BotStatisticsHandler:
 Натисни кнопку нижче для перегляду статистики!"""
         
         buttons = [
-            [Button.callback("📊 Статистика за тиждень", b"stats_7")],
-            [Button.callback("📆 Статистика за місяць", b"stats_30")]
+            [Button.inline("📊 Статистика за тиждень", b"stats_7")],
+            [Button.inline("📆 Статистика за місяць", b"stats_30")]
         ]
         
         await event.respond(welcome_msg, buttons=buttons)
@@ -50,9 +50,9 @@ class BotStatisticsHandler:
             stats_msg = self.format_simple_statistics(days)
             
             buttons = [
-                [Button.callback("📊 За тиждень", b"stats_7")],
-                [Button.callback("📆 За місяць", b"stats_30")],
-                [Button.callback("🔄 Оновити", f"stats_{days}".encode())]
+                [Button.inline("📊 За тиждень", b"stats_7")],
+                [Button.inline("📆 За місяць", b"stats_30")],
+                [Button.inline("🔄 Оновити", f"stats_{days}".encode())]
             ]
             
             await event.edit(stats_msg, buttons=buttons)
