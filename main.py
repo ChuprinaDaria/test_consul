@@ -88,7 +88,7 @@ async def find_message_to_edit(city):
 async def handle_slots_gone(event):
     """
     Якщо прийшло повідомлення "❌ На жаль..." — знаходимо попередній пост у каналі за містом
-    і редагуємо його коротким текстом, без преміум-хвоста.
+    і ДОДАЄМО до нього інфо про зайнятість, зберігаючи оригінальний текст і кнопку.
     """
     full_place, city, time_display = parse_slots_gone_message(event.raw_text)
     if not city:
@@ -106,11 +106,36 @@ async def handle_slots_gone(event):
             pass
         return True
 
-    new_text = f"❌ **На жаль, слотів у {full_place} більше немає!**\n\n⏱️ Слоти були доступні **{time_display}**"
-
     try:
-        await bot_client.edit_message(channel_id, sent_msg_id, new_text, parse_mode='markdown')
-        print(f"✏️ Оновлено повідомлення для {city}: {time_display}")
+        # Отримуємо існуюче повідомлення
+        messages = await bot_client.get_messages(channel_id, ids=sent_msg_id)
+        
+        # get_messages повертає список, навіть для одного ID
+        if not messages or not messages[0]:
+            print(f"❌ Не вдалося знайти повідомлення {sent_msg_id}")
+            return True
+            
+        existing_message = messages[0]
+        
+        # Перевіряємо чи вже є мітка про зайнятість
+        if "❌" in existing_message.text:
+            print(f"⚠️ Повідомлення для {city} вже має мітку про зайнятість")
+            return True
+        
+        # ДОДАЄМО до існуючого тексту мітку про зайнятість
+        updated_text = f"❌ {existing_message.text}\n\n⏱️ _Слоти були доступні {time_display}_"
+        
+        # Зберігаємо оригінальні кнопки
+        await bot_client.edit_message(
+            channel_id, 
+            sent_msg_id, 
+            updated_text, 
+            buttons=existing_message.buttons,  # ← ОСЬ КЛЮЧ!
+            parse_mode='markdown'
+        )
+        
+        print(f"✏️ Додано мітку зайнятості для {city}: {time_display}")
+        
     except Exception as e:
         print(f"❌ Не вдалося оновити повідомлення для {city}: {e}")
 
