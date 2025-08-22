@@ -57,91 +57,29 @@ init_db()
 # ХЕЛПЕРИ
 # ============================================================
 
-async def find_message_to_edit(city):
-    """Знаходить повідомлення для редагування: спочатку в БД, потім в каналі"""
-    
-    # Спочатку шукаємо в БД (нові повідомлення)
-    sent_msg_id, content_hash = get_sent_message_id_by_city(city)
-    if sent_msg_id:
-        return sent_msg_id, content_hash
-    
-    # Якщо в БД немає - шукаємо в каналі (старі повідомлення)
-    try:
-        print(f"🔍 Шукаю старе повідомлення про {city} безпосередньо в каналі...")
-        
-        # Беремо останні 20 повідомлень з каналу
-        messages = await bot_client.get_messages(channel_id, limit=20)
-        
-        for msg in messages:
-            if msg.text and city in msg.text and ("слоти в " in msg.text or "Доступні слоти в" in msg.text):
-                print(f"✅ Знайшов повідомлення ID {msg.id} з текстом про {city}")
-                return msg.id, None
-                
-        print(f"❌ Не знайшов жодного повідомлення про {city} в останніх 20 повідомленнях каналу")
-        return None, None
-        
-    except Exception as e:
-        print(f"⚠️ Помилка пошуку в каналі: {e}")
-        return None, None
-
 
 async def handle_slots_gone(event):
     """
-    Якщо прийшло повідомлення "❌ На жаль..." — знаходимо попередній пост у каналі за містом
-    і ДОДАЄМО до нього інфо про зайнятість, зберігаючи оригінальний текст і кнопку.
+    Якщо прийшло повідомлення "❌ На жаль..." — відправляємо тиху нотифікацію
+    БЕЗ редагування попереднього повідомлення
     """
     full_place, city, time_display = parse_slots_gone_message(event.raw_text)
     if not city:
         return False  # це не "зайнято"-повідомлення
 
-    # Шукаємо повідомлення для редагування (БД + канал)
-    sent_msg_id, content_hash = await find_message_to_edit(city)
-    
-    if not sent_msg_id:
-        print(f"⚠️ Не знайдено попереднього повідомлення для міста: {city}")
-        # Все одно помічаємо як оброблене, щоб не зациклитись
-        try:
-            mark_gone_processed("", event.id)
-        except Exception:
-            pass
-        return True
+    # Формуємо чисте повідомлення БЕЗ преміум-приписки
+    clean_text = f"❌ **На жаль, слотів у {full_place} більше немає!**\n\n⏱️ Слоти були доступні **{time_display}**"
 
     try:
-        # Отримуємо існуюче повідомлення
-        messages = await bot_client.get_messages(channel_id, ids=sent_msg_id)
-        
-        # get_messages повертає список, навіть для одного ID
-        if not messages or not messages[0]:
-            print(f"❌ Не вдалося знайти повідомлення {sent_msg_id}")
-            return True
-            
-        existing_message = messages[0]
-        
-        # Перевіряємо чи вже є мітка про зайнятість
-        if "❌" in existing_message.text:
-            print(f"⚠️ Повідомлення для {city} вже має мітку про зайнятість")
-            return True
-        
-        # ДОДАЄМО до існуючого тексту мітку про зайнятість
-        updated_text = f"❌ {existing_message.text}\n\n⏱️ _Слоти були доступні {time_display}_"
-        
-        # Зберігаємо оригінальні кнопки
-        await bot_client.edit_message(
-            channel_id, 
-            sent_msg_id, 
-            updated_text, 
-            buttons=existing_message.buttons,  # ← ОСЬ КЛЮЧ!
-            parse_mode='markdown'
-        )
-        
-        print(f"✏️ Додано мітку зайнятості для {city}: {time_display}")
-        
+        # Відправляємо ТИХО (silent=True)
+        await bot_client.send_message(channel_id, clean_text, silent=True, parse_mode='markdown')
+        print(f"🔕 Тиха нотифікація про зайнятість слотів у {city}: {time_display}")
     except Exception as e:
-        print(f"❌ Не вдалося оновити повідомлення для {city}: {e}")
+        print(f"❌ Не вдалося відправити тиху нотифікацію для {city}: {e}")
 
     # Позначаємо "зайнято"-повідомлення як оброблене
     try:
-        mark_gone_processed(content_hash if content_hash else "", event.id)
+        mark_gone_processed("", event.id)
     except Exception:
         pass
     return True
@@ -212,6 +150,32 @@ def get_hourly_city_stats(days=30):
     
     return top_hours, top_cities
 
+def generate_content_hash_improved(text, parsed_msg):
+    """
+    Поліпшена функція для генерації хешу контенту.
+    Враховує тільки ключову інформацію: місто + дати + часи
+    """
+    import hashlib
+    
+    city = ""
+    dates_times = ""
+    
+    # Витягуємо місто
+    if "слоти в " in parsed_msg:
+        city_match = re.search(r'слоти в (.+?)!', parsed_msg)
+        if city_match:
+            city = city_match.group(1).strip()
+    
+    # Витягуємо дати та часи з оригінального тексту
+    date_sections = re.findall(r'(\d{2}\.\d{2}\.\d{4}):\s*([0-9:\s]+)', text)
+    if date_sections:
+        # Сортуємо дати та часи для консистентності
+        sorted_dates = sorted(date_sections)
+        dates_times = ";".join([f"{date}:{times.strip()}" for date, times in sorted_dates])
+    
+    # Генеруємо хеш
+    content_for_hash = f"{city}_{dates_times}"
+    return hashlib.md5(content_for_hash.encode()).hexdigest()
 
 # --- Мікро-аналітика без лізти у внутрішні методи StatisticsModule ---
 _announced_today = set()  # {(YYYY-MM-DD, hour)}
@@ -299,12 +263,14 @@ async def handler(event):
         parsed_msg, buttons, content_hash = parse_slot_message(event.raw_text)
 
         if parsed_msg and buttons and content_hash:
-            # 3) Антидубль по контенту (за 30 хв)
-            if is_content_processed_recently(content_hash, 30):
-                print("⭕ ПРОПУЩЕНО: Аналогічний контент публікувався протягом останніх 30 хвилин")
-                print("💡 Слот може з'явитись знову через 30+ хвилин якщо хтось відмовиться")
-                # все одно помітимо як оброблене за msg_id, щоб не дьоргати по колу
-                mark_processed_with_stats(msg_id, content_hash)
+            # Генеруємо кращий хеш
+            improved_hash = generate_content_hash_improved(event.raw_text, parsed_msg)
+            print(f"🔍 Поліпшений хеш: {improved_hash[:10]}...")
+            
+            # Антидубль за 60 хвилин (було 30)
+            if is_content_processed_recently(improved_hash, 60):
+                print("⭕ ПРОПУЩЕНО: Той самий контент за останню годину")
+                mark_processed_with_stats(msg_id, improved_hash)
                 return
 
             print("✅ УСПІШНО РОЗПАРСЕНО!")
@@ -330,18 +296,18 @@ async def handler(event):
                 # 5) Дані для статистики
                 city, service, slots_count, available_dates = extract_slot_info(event.raw_text, parsed_msg)
 
-                # 6) Позначаємо як оброблене зі статистикою
+                # 6) Зберігаємо з новим хешем
                 mark_processed_with_stats(
                     msg_id=msg_id,
-                    content_hash=content_hash,
+                    content_hash=improved_hash,  # ← ЗМІНЕНО
                     city=city,
                     service=service,
                     slots_count=slots_count,
                     available_dates=available_dates
                 )
 
-                # 7) Зберігаємо message_id для можливого редагування ("❌ На жаль…")
-                save_sent_message(content_hash, sent.id)
+                # 7) Зберігаємо message_id
+                save_sent_message(improved_hash, sent.id)  # ← ЗМІНЕНО
 
                 print(f"🎉 УСПІШНО ВІДПРАВЛЕНО в канал @{channel_id}!")
                 print(f"📊 Додано до статистики: {city}, {service}, {slots_count} слотів")
